@@ -12,6 +12,7 @@ class AudioProcessor {
   private gain: GainNode | null = null
   private analyser: AnalyserNode | null = null
   private destination: MediaStreamAudioDestinationNode | null = null
+  private isDestinationSupported = false
 
   async init(stream: MediaStream) {
     this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)()
@@ -50,27 +51,34 @@ class AudioProcessor {
     this.analyser = this.audioContext.createAnalyser()
     this.analyser.fftSize = 256
 
-    // Выход для записи
-    this.destination = this.audioContext.createMediaStreamAudioDestinationNode()
-
-    // Соединяем цепочку: Source → Compressor → EQ → Gain → Analyser → Destination
-    this.source.connect(this.compressor)
-    this.compressor.connect(this.eqLow)
-    this.eqLow.connect(this.eqMid)
-    this.eqMid.connect(this.eqHigh)
-    this.eqHigh.connect(this.gain)
-    this.gain.connect(this.analyser)
-    this.analyser.connect(this.destination)
+    // 🔧 ПРОВЕРКА: поддерживается ли MediaStreamAudioDestinationNode
+    this.isDestinationSupported = typeof this.audioContext.createMediaStreamAudioDestinationNode === 'function'
+    
+    if (this.isDestinationSupported) {
+      this.destination = this.audioContext.createMediaStreamAudioDestinationNode()
+      // Цепочка с обработкой: Source → Compressor → EQ → Gain → Analyser → Destination
+      this.source.connect(this.compressor)
+      this.compressor.connect(this.eqLow)
+      this.eqLow.connect(this.eqMid)
+      this.eqMid.connect(this.eqHigh)
+      this.eqHigh.connect(this.gain)
+      this.gain.connect(this.analyser)
+      this.analyser.connect(this.destination)
+    } else {
+      // 🔧 Фоллбэк: прямая запись без обработки (для совместимости)
+      this.source.connect(this.analyser)
+      console.warn('MediaStreamAudioDestinationNode not supported, using direct recording')
+    }
   }
 
-  // 🔧 НОВЫЙ МЕТОД: получить AudioContext (для resume)
+  // Получить AudioContext (для resume)
   getAudioContext(): AudioContext | null {
     return this.audioContext
   }
 
   // Настройки эквалайзера
   setEQ(low: number, mid: number, high: number) {
-    if (!this.audioContext) return
+    if (!this.audioContext || !this.isDestinationSupported) return
     this.eqLow?.gain.setValueAtTime(low, this.audioContext.currentTime)
     this.eqMid?.gain.setValueAtTime(mid, this.audioContext.currentTime)
     this.eqHigh?.gain.setValueAtTime(high, this.audioContext.currentTime)
@@ -78,13 +86,23 @@ class AudioProcessor {
 
   // Мастер-громкость
   setMasterGain(value: number) {
-    if (!this.audioContext) return
+    if (!this.audioContext || !this.isDestinationSupported) return
     this.gain?.gain.setValueAtTime(value, this.audioContext.currentTime)
   }
 
-  // Получить поток для записи (с обработкой)
-  getProcessedStream(): MediaStream {
-    return this.destination!.stream
+  // Получить поток для записи
+  getProcessedStream(): MediaStream | null {
+    return this.destination?.stream || null
+  }
+
+  // Проверка: нужна ли прямая запись (без обработки)
+  needsDirectRecording(): boolean {
+    return !this.isDestinationSupported
+  }
+
+  // Получить исходный поток (для фоллбэка)
+  getOriginalSource(): MediaStreamAudioSourceNode | null {
+    return this.source
   }
 
   // Получить данные для визуализации
@@ -95,6 +113,7 @@ class AudioProcessor {
   // Очистка
   cleanup() {
     this.source?.disconnect()
+    this.destination?.disconnect()
     this.audioContext?.close()
     this.audioContext = null
   }
@@ -136,12 +155,14 @@ export default function Recorder() {
   const [showSettings, setShowSettings] = useState(false)
   const [eq, setEq] = useState({ low: 0, mid: 0, high: 0 })
   const [masterGain, setMasterGain] = useState(1)
+  const [isProcessingSupported, setIsProcessingSupported] = useState(true)
   
   const mediaRecorder = useRef<MediaRecorder | null>(null)
   const processor = useRef<AudioProcessor | null>(null)
   const chunks = useRef<Blob[]>([])
   const animationRef = useRef<number>()
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const originalStream = useRef<MediaStream | null>(null)
 
   // Визуализация волны
   const visualize = () => {
@@ -175,33 +196,52 @@ export default function Recorder() {
     draw()
   }
 
-  // 🔧 ОБНОВЛЁННАЯ ФУНКЦИЯ START (фикс микрофона для HTTPS)
+  // 🔧 ОБНОВЛЁННАЯ ФУНКЦИЯ START (с фоллбэком)
   const start = async () => {
     try {
-      // 1. Сначала запрашиваем микрофон
+      // 1. Запрашиваем микрофон
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      originalStream.current = stream
       
-      // 2. Инициализируем аудио-контекст ТОЛЬКО после пользовательского действия
+      // 2. Инициализируем процессор
       processor.current = new AudioProcessor()
       await processor.current.init(stream)
       
-      // 3. 🔧 ВАЖНО: Резюмим AudioContext (требование браузеров для https)
+      // 🔧 Проверяем поддержку обработки
+      const needsDirect = processor.current.needsDirectRecording()
+      setIsProcessingSupported(!needsDirect)
+      
+      // 3. Резюмим AudioContext (требование браузеров для https)
       const ctx = processor.current.getAudioContext()
       if (ctx?.state === 'suspended') {
         await ctx.resume()
       }
       
-      // 4. Применяем настройки
-      processor.current.setEQ(eq.low, eq.mid, eq.high)
-      processor.current.setMasterGain(masterGain)
+      // 4. Применяем настройки (если поддерживается)
+      if (!needsDirect) {
+        processor.current.setEQ(eq.low, eq.mid, eq.high)
+        processor.current.setMasterGain(masterGain)
+      }
 
       // 5. Запускаем визуализацию
       visualize()
 
-      // 6. Записываем ОБРАБОТАННЫЙ поток
-      const processedStream = processor.current.getProcessedStream()
-      mediaRecorder.current = new MediaRecorder(processedStream, { 
-        mimeType: 'audio/webm;codecs=opus' // Более совместимый формат
+      // 6. 🔧 Выбираем поток для записи
+      let recordStream: MediaStream
+      if (needsDirect) {
+        // Фоллбэк: прямая запись без обработки
+        recordStream = stream
+        console.log('Using direct recording (processing not supported)')
+      } else {
+        // Обработанный поток
+        const processed = processor.current.getProcessedStream()
+        if (!processed) throw new Error('Failed to get processed stream')
+        recordStream = processed
+      }
+
+      // 7. Записываем
+      mediaRecorder.current = new MediaRecorder(recordStream, { 
+        mimeType: 'audio/webm;codecs=opus'
       })
       
       chunks.current = []
@@ -220,7 +260,7 @@ export default function Recorder() {
         const audioContext = new AudioContext()
         const audioBuffer = await audioContext.decodeAudioData(arrayBuffer)
         
-        // Нормализуем
+        // Нормализуем (всегда работает, даже при прямой записи)
         const normalized = AudioProcessor.normalizeBuffer(audioBuffer)
         const wavBlob = bufferToWav(normalized)
         setAudioURL(URL.createObjectURL(wavBlob))
@@ -229,7 +269,10 @@ export default function Recorder() {
         processor.current?.cleanup()
         processor.current = null
         if (animationRef.current) cancelAnimationFrame(animationRef.current)
-        stream.getTracks().forEach(t => t.stop())
+        if (originalStream.current) {
+          originalStream.current.getTracks().forEach(t => t.stop())
+          originalStream.current = null
+        }
         audioContext.close()
       }
       
@@ -244,7 +287,7 @@ export default function Recorder() {
       } else if (err.name === 'NotFoundError') {
         alert('❌ Микрофон не найден. Подключите микрофон и попробуйте снова.')
       } else {
-        alert('Ошибка микрофона: ' + (err.message || err))
+        alert('Ошибка: ' + (err.message || err))
       }
     }
   }
@@ -258,11 +301,11 @@ export default function Recorder() {
 
   // Обновляем настройки процессора в реальном времени
   useEffect(() => {
-    if (processor.current && recording) {
+    if (processor.current && recording && isProcessingSupported) {
       processor.current.setEQ(eq.low, eq.mid, eq.high)
       processor.current.setMasterGain(masterGain)
     }
-  }, [eq, masterGain, recording])
+  }, [eq, masterGain, recording, isProcessingSupported])
 
   // Конвертер AudioBuffer → WAV
   const bufferToWav = (buffer: AudioBuffer): Blob => {
@@ -314,8 +357,10 @@ export default function Recorder() {
         <button 
           onClick={() => setShowSettings(!showSettings)}
           className="p-2 hover:bg-[#0F0F1B] rounded-lg transition"
+          disabled={!isProcessingSupported}
+          title={!isProcessingSupported ? 'Обработка не поддерживается в этом браузере' : 'Настройки'}
         >
-          <Settings className="w-5 h-5 text-[#7B61FF]" />
+          <Settings className={`w-5 h-5 ${isProcessingSupported ? 'text-[#7B61FF]' : 'text-gray-500'}`} />
         </button>
       </div>
 
@@ -326,6 +371,14 @@ export default function Recorder() {
         height={100} 
         className="w-full h-24 bg-[#0F0F1B] rounded-lg mb-6"
       />
+
+      {/* 🔧 Инфо о поддержке обработки */}
+      {!isProcessingSupported && recording && (
+        <div className="bg-yellow-500/20 border border-yellow-500/40 rounded-lg p-3 mb-4 text-sm text-yellow-200">
+          ⚠️ Ваш браузер не поддерживает обработку в реальном времени. 
+          Запись идёт в исходном качестве, но нормализация применится при сохранении.
+        </div>
+      )}
 
       {/* Кнопки записи */}
       <div className="flex justify-center gap-4 mb-6">
@@ -353,102 +406,113 @@ export default function Recorder() {
             <Sliders className="w-4 h-4" /> Настройки обработки
           </h3>
           
-          {/* Эквалайзер */}
-          <div className="space-y-3">
-            <div className="flex items-center gap-3">
-              <span className="text-sm w-16">Низкие</span>
-              <input 
-                type="range" 
-                min="-12" 
-                max="12" 
-                step="0.5"
-                value={eq.low}
-                onChange={e => setEq(prev => ({ ...prev, low: Number(e.target.value) }))}
-                className="flex-1 accent-[#7B61FF]"
-              />
-              <span className="text-sm w-12 text-right">{eq.low} dB</span>
-            </div>
-            <div className="flex items-center gap-3">
-              <span className="text-sm w-16">Средние</span>
-              <input 
-                type="range" 
-                min="-12" 
-                max="12" 
-                step="0.5"
-                value={eq.mid}
-                onChange={e => setEq(prev => ({ ...prev, mid: Number(e.target.value) }))}
-                className="flex-1 accent-[#7B61FF]"
-              />
-              <span className="text-sm w-12 text-right">{eq.mid} dB</span>
-            </div>
-            <div className="flex items-center gap-3">
-              <span className="text-sm w-16">Высокие</span>
-              <input 
-                type="range" 
-                min="-12" 
-                max="12" 
-                step="0.5"
-                value={eq.high}
-                onChange={e => setEq(prev => ({ ...prev, high: Number(e.target.value) }))}
-                className="flex-1 accent-[#7B61FF]"
-              />
-              <span className="text-sm w-12 text-right">{eq.high} dB</span>
-            </div>
-          </div>
+          {!isProcessingSupported ? (
+            <p className="text-sm text-gray-400">
+              ⚠️ Обработка в реальном времени не поддерживается в этом браузере. 
+              Попробуйте Chrome, Edge или Firefox на компьютере.
+            </p>
+          ) : (
+            <>
+              {/* Эквалайзер */}
+              <div className="space-y-3">
+                <div className="flex items-center gap-3">
+                  <span className="text-sm w-16">Низкие</span>
+                  <input 
+                    type="range" 
+                    min="-12" 
+                    max="12" 
+                    step="0.5"
+                    value={eq.low}
+                    onChange={e => setEq(prev => ({ ...prev, low: Number(e.target.value) }))}
+                    className="flex-1 accent-[#7B61FF]"
+                  />
+                  <span className="text-sm w-12 text-right">{eq.low} dB</span>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className="text-sm w-16">Средние</span>
+                  <input 
+                    type="range" 
+                    min="-12" 
+                    max="12" 
+                    step="0.5"
+                    value={eq.mid}
+                    onChange={e => setEq(prev => ({ ...prev, mid: Number(e.target.value) }))}
+                    className="flex-1 accent-[#7B61FF]"
+                  />
+                  <span className="text-sm w-12 text-right">{eq.mid} dB</span>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className="text-sm w-16">Высокие</span>
+                  <input 
+                    type="range" 
+                    min="-12" 
+                    max="12" 
+                    step="0.5"
+                    value={eq.high}
+                    onChange={e => setEq(prev => ({ ...prev, high: Number(e.target.value) }))}
+                    className="flex-1 accent-[#7B61FF]"
+                  />
+                  <span className="text-sm w-12 text-right">{eq.high} dB</span>
+                </div>
+              </div>
 
-          {/* Мастер-громкость */}
-          <div className="flex items-center gap-3">
-            <Volume2 className="w-4 h-4" />
-            <input 
-              type="range" 
-              min="0" 
-              max="2" 
-              step="0.1"
-              value={masterGain}
-              onChange={e => setMasterGain(Number(e.target.value))}
-              className="flex-1 accent-[#00D4AA]"
-            />
-            <span className="text-sm w-12 text-right">{(masterGain * 100).toFixed(0)}%</span>
-          </div>
+              {/* Мастер-громкость */}
+              <div className="flex items-center gap-3">
+                <Volume2 className="w-4 h-4" />
+                <input 
+                  type="range" 
+                  min="0" 
+                  max="2" 
+                  step="0.1"
+                  value={masterGain}
+                  onChange={e => setMasterGain(Number(e.target.value))}
+                  className="flex-1 accent-[#00D4AA]"
+                />
+                <span className="text-sm w-12 text-right">{(masterGain * 100).toFixed(0)}%</span>
+              </div>
 
-          {/* Пресеты */}
-          <div className="flex gap-2 pt-2">
-            <button 
-              onClick={() => setEq({ low: 3, mid: 0, high: 2 })}
-              className="text-xs px-3 py-1 bg-[#7B61FF]/20 hover:bg-[#7B61FF]/40 rounded transition"
-            >
-              🎤 Вокал
-            </button>
-            <button 
-              onClick={() => setEq({ low: -3, mid: 2, high: 4 })}
-              className="text-xs px-3 py-1 bg-[#7B61FF]/20 hover:bg-[#7B61FF]/40 rounded transition"
-            >
-              📻 Подкаст
-            </button>
-            <button 
-              onClick={() => setEq({ low: 0, mid: 0, high: 0 })}
-              className="text-xs px-3 py-1 bg-gray-600/20 hover:bg-gray-600/40 rounded transition"
-            >
-              🔄 Сброс
-            </button>
-          </div>
+              {/* Пресеты */}
+              <div className="flex gap-2 pt-2">
+                <button 
+                  onClick={() => setEq({ low: 3, mid: 0, high: 2 })}
+                  className="text-xs px-3 py-1 bg-[#7B61FF]/20 hover:bg-[#7B61FF]/40 rounded transition"
+                >
+                  🎤 Вокал
+                </button>
+                <button 
+                  onClick={() => setEq({ low: -3, mid: 2, high: 4 })}
+                  className="text-xs px-3 py-1 bg-[#7B61FF]/20 hover:bg-[#7B61FF]/40 rounded transition"
+                >
+                  📻 Подкаст
+                </button>
+                <button 
+                  onClick={() => setEq({ low: 0, mid: 0, high: 0 })}
+                  className="text-xs px-3 py-1 bg-gray-600/20 hover:bg-gray-600/40 rounded transition"
+                >
+                  🔄 Сброс
+                </button>
+              </div>
+            </>
+          )}
         </div>
       )}
 
       {/* Результат записи */}
       {audioURL && (
         <div className="bg-[#0F0F1B] rounded-lg p-4 space-y-4">
-          <h3 className="font-bold">🎵 Ваша запись (с обработкой):</h3>
+          <h3 className="font-bold">🎵 Ваша запись:</h3>
           <audio controls src={audioURL} className="w-full" />
           <a 
             href={audioURL} 
-            download={`vocal_processed_${Date.now()}.wav`}
+            download={`vocal_${isProcessingSupported ? 'processed_' : ''}${Date.now()}.wav`}
             className="inline-flex items-center gap-2 bg-[#7B61FF] hover:bg-[#7B61FF]/80 text-white px-4 py-2 rounded-lg transition"
           >
-            <Download className="w-5 h-5" /> Скачать WAV (нормализованный)
+            <Download className="w-5 h-5" /> Скачать WAV {isProcessingSupported && '(нормализованный)'}
           </a>
           <p className="text-xs text-gray-400">
-            ✅ Компрессия • ✅ Эквалайзер • ✅ Нормализация до -18 LUFS
+            {isProcessingSupported 
+              ? '✅ Компрессия • ✅ Эквалайзер • ✅ Нормализация' 
+              : '✅ Запись • ✅ Нормализация при сохранении'}
           </p>
         </div>
       )}
