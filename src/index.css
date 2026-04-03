@@ -1,32 +1,17 @@
 /* src/index.css - Базовые стили */
-* {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
+:root {
+  font-family: Inter, system-ui, sans-serif;
+  background-color: #0F0F1B;
+  color: rgba(255, 255, 255, 0.87);
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  background-color: #0F0F1B;
-  color: #ffffff;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
 }
 
 #root {
-  min-height: 100vh;
-  display: flex;
-  flex-direction: column;
-}
-
-/* Скрываем скроллбар для чистого вида */
-::-webkit-scrollbar {
-  width: 6px;
-}
-::-webkit-scrollbar-track {
-  background: #1A1A2E;
-}
-::-webkit-scrollbar-thumb {
-  background: #7B61FF;
-  border-radius: 3px;
+  width: 100%;
+  margin: 0 auto;
 }
