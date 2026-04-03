@@ -115,72 +115,90 @@ export default function Recorder() {
 
   const mediaRecorder = useRef<MediaRecorder | null>(null)
   const chunks = useRef<Blob[]>([])
-  const animRef = useRef<number>()
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const analyserRef = useRef<AnalyserNode | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
+  const animFrameRef = useRef<number>(0)
 
-  // --- Визуализация ---
-  const drawIdle = (ctx: CanvasRenderingContext2D, w: number, h: number) => {
-    ctx.clearRect(0, 0, w, h)
-    // Сетка
-    ctx.strokeStyle = '#1F1F3A'
-    ctx.lineWidth = 1
-    for(let i=1; i<4; i++) {
-      ctx.beginPath(); ctx.moveTo(0, h*i/4); ctx.lineTo(w, h*i/4); ctx.stroke()
-    }
-    // Линия готовности
-    ctx.strokeStyle = '#7B61FF40'
-    ctx.lineWidth = 2
-    ctx.setLineDash([4, 4])
-    ctx.beginPath(); ctx.moveTo(0, h/2); ctx.lineTo(w, h/2); ctx.stroke()
-    ctx.setLineDash([])
-    
-    ctx.fillStyle = '#6B7280'
-    ctx.font = '12px sans-serif'
-    ctx.textAlign = 'center'
-    ctx.fillText('🎙️ Готов к записи', w/2, h/2 - 8)
-  }
-
-  const drawBars = (ctx: CanvasRenderingContext2D, w: number, h: number, data: Uint8Array) => {
-    ctx.clearRect(0, 0, w, h)
-    const barW = w / data.length * 2.5
-    let x = 0
-    for (let i = 0; i < data.length; i++) {
-      const barH = (data[i] / 255) * h
-      const g = ctx.createLinearGradient(0, h, 0, 0)
-      g.addColorStop(0, '#00D4AA'); g.addColorStop(1, '#7B61FF')
-      ctx.fillStyle = g
-      ctx.fillRect(x, h - barH, barW - 2, barH)
-      x += barW
-    }
-  }
-
-  const visualize = () => {
+  // --- Визуализация (ИСПРАВЛЕННАЯ) ---
+  useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
     const ctx = canvas.getContext('2d')
     if (!ctx) return
-    const w = canvas.width, h = canvas.height
-    
-    // Рисуем idle сразу
+
+    // Чёткость на Retina/HiDPI экранах
+    const dpr = window.devicePixelRatio || 1
+    const rect = canvas.getBoundingClientRect()
+    canvas.width = rect.width * dpr
+    canvas.height = rect.height * dpr
+    ctx.scale(dpr, dpr)
+    const w = rect.width
+    const h = rect.height
+
+    // Функция отрисовки "в простое"
+    const drawIdle = () => {
+      ctx.fillStyle = '#0F0F1B'
+      ctx.fillRect(0, 0, w, h)
+      ctx.strokeStyle = '#1F1F3A'
+      ctx.lineWidth = 1
+      for(let i=1; i<4; i++) {
+        ctx.beginPath(); ctx.moveTo(0, h*i/4); ctx.lineTo(w, h*i/4); ctx.stroke()
+      }
+      ctx.strokeStyle = '#7B61FF40'
+      ctx.lineWidth = 2
+      ctx.setLineDash([4, 4])
+      ctx.beginPath(); ctx.moveTo(0, h/2); ctx.lineTo(w, h/2); ctx.stroke()
+      ctx.setLineDash([])
+      ctx.fillStyle = '#6B7280'
+      ctx.font = '12px sans-serif'
+      ctx.textAlign = 'center'
+      ctx.fillText('🎙️ Готов к записи', w/2, h/2 - 8)
+    }
+
+    // Функция отрисовки "во время записи"
+    const drawActive = (data: Uint8Array) => {
+      ctx.fillStyle = '#0F0F1B'
+      ctx.fillRect(0, 0, w, h)
+      const barW = w / data.length * 2.5
+      let x = 0
+      for (let i = 0; i < data.length; i++) {
+        const barH = (data[i] / 255) * h
+        const g = ctx.createLinearGradient(0, h, 0, 0)
+        g.addColorStop(0, '#00D4AA')
+        g.addColorStop(1, '#7B61FF')
+        ctx.fillStyle = g
+        ctx.fillRect(x, h - barH, barW - 2, barH)
+        x += barW
+      }
+    }
+
+    // Управление циклом анимации
     if (!recording) {
-      drawIdle(ctx, w, h)
+      // Останавливаем анимацию и рисуем idle
+      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current)
+      drawIdle()
       return
     }
 
-    const data = new Uint8Array(analyserRef.current?.frequencyBinCount || 128)
+    // Запускаем анимацию
+    const dataArray = new Uint8Array(analyserRef.current?.frequencyBinCount || 128)
     const loop = () => {
-      if (!recording) return
-      animRef.current = requestAnimationFrame(loop)
-      analyserRef.current?.getByteFrequencyData(data)
-      drawBars(ctx, w, h, data)
+      if (!analyserRef.current) {
+        drawIdle()
+        return
+      }
+      analyserRef.current.getByteFrequencyData(dataArray)
+      drawActive(dataArray)
+      animFrameRef.current = requestAnimationFrame(loop)
     }
     loop()
-  }
 
-  // Перерисовка при смене состояния
-  useEffect(() => { visualize() }, [recording])
+    // Очистка при размонтировании или смене recording
+    return () => {
+      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current)
+    }
+  }, [recording])
 
   const start = async () => {
     try {
@@ -215,17 +233,15 @@ export default function Recorder() {
           alert('Ошибка обработки: ' + (err as Error).message)
         } finally {
           setProcessing(false)
-          if (animRef.current) cancelAnimationFrame(animRef.current)
           stream.getTracks().forEach(t => t.stop())
           streamRef.current = null
           analyserRef.current = null
-          // Возвращаем idle-состояние
-          visualize()
+          setRecording(false) // Триггерит useEffect -> вернёт idle-состояние
         }
       }
       
       mediaRecorder.current.start()
-      setRecording(true)
+      setRecording(true) // Триггерит useEffect -> запустит анимацию
     } catch (err: any) {
       alert(err.name === 'NotAllowedError' ? '❌ Разрешите доступ к микрофону' : 'Ошибка: ' + err.message)
     }
@@ -247,14 +263,9 @@ export default function Recorder() {
         </button>
       </div>
 
-      {/* Canvas с корректным фоном и состояниями */}
+      {/* Canvas визуализатор */}
       <div className="relative w-full h-24 bg-[#0F0F1B] rounded-lg mb-6 overflow-hidden">
-        <canvas 
-          ref={canvasRef} 
-          width={400} 
-          height={100} 
-          className="w-full h-full"
-        />
+        <canvas ref={canvasRef} className="w-full h-full block" />
       </div>
       
       <div className="flex justify-center gap-4 mb-6">
