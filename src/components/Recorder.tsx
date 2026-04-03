@@ -63,6 +63,11 @@ class AudioProcessor {
     this.analyser.connect(this.destination)
   }
 
+  // 🔧 НОВЫЙ МЕТОД: получить AudioContext (для resume)
+  getAudioContext(): AudioContext | null {
+    return this.audioContext
+  }
+
   // Настройки эквалайзера
   setEQ(low: number, mid: number, high: number) {
     if (!this.audioContext) return
@@ -145,7 +150,6 @@ export default function Recorder() {
     const ctx = canvas.getContext('2d')
     if (!ctx) return
 
-    const bufferLength = processor.current.getAnalyserData(new Uint8Array(128))
     const dataArray = new Uint8Array(128)
     
     const draw = () => {
@@ -171,27 +175,46 @@ export default function Recorder() {
     draw()
   }
 
+  // 🔧 ОБНОВЛЁННАЯ ФУНКЦИЯ START (фикс микрофона для HTTPS)
   const start = async () => {
     try {
+      // 1. Сначала запрашиваем микрофон
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       
-      // Инициализируем процессор
+      // 2. Инициализируем аудио-контекст ТОЛЬКО после пользовательского действия
       processor.current = new AudioProcessor()
       await processor.current.init(stream)
+      
+      // 3. 🔧 ВАЖНО: Резюмим AudioContext (требование браузеров для https)
+      const ctx = processor.current.getAudioContext()
+      if (ctx?.state === 'suspended') {
+        await ctx.resume()
+      }
+      
+      // 4. Применяем настройки
       processor.current.setEQ(eq.low, eq.mid, eq.high)
       processor.current.setMasterGain(masterGain)
 
-      // Запускаем визуализацию
+      // 5. Запускаем визуализацию
       visualize()
 
-      // Записываем ОБРАБОТАННЫЙ поток
+      // 6. Записываем ОБРАБОТАННЫЙ поток
       const processedStream = processor.current.getProcessedStream()
-      mediaRecorder.current = new MediaRecorder(processedStream, { mimeType: 'audio/webm' })
-      chunks.current = []
+      mediaRecorder.current = new MediaRecorder(processedStream, { 
+        mimeType: 'audio/webm;codecs=opus' // Более совместимый формат
+      })
       
-      mediaRecorder.current.ondataavailable = e => chunks.current.push(e.data)
+      chunks.current = []
+      mediaRecorder.current.ondataavailable = e => {
+        if (e.data.size > 0) chunks.current.push(e.data)
+      }
+      
       mediaRecorder.current.onstop = async () => {
-        // Конвертируем в WAV с нормализацией
+        if (chunks.current.length === 0) {
+          alert('Запись пуста. Попробуйте ещё раз.')
+          return
+        }
+        
         const blob = new Blob(chunks.current, { type: 'audio/webm' })
         const arrayBuffer = await blob.arrayBuffer()
         const audioContext = new AudioContext()
@@ -199,8 +222,6 @@ export default function Recorder() {
         
         // Нормализуем
         const normalized = AudioProcessor.normalizeBuffer(audioBuffer)
-        
-        // Конвертируем в WAV
         const wavBlob = bufferToWav(normalized)
         setAudioURL(URL.createObjectURL(wavBlob))
         
@@ -214,8 +235,17 @@ export default function Recorder() {
       
       mediaRecorder.current.start()
       setRecording(true)
-    } catch (err) {
-      alert('Нет доступа к микрофону. Разрешите доступ в настройках браузера.')
+      
+    } catch (err: any) {
+      console.error('Microphone error:', err)
+      
+      if (err.name === 'NotAllowedError') {
+        alert('❌ Доступ к микрофону запрещён.\n\n1. Нажмите на иконку 🔒/🎤 в адресной строке браузера\n2. Разрешите доступ к микрофону\n3. Обновите страницу (Ctrl+Shift+R)\n4. Попробуйте ещё раз')
+      } else if (err.name === 'NotFoundError') {
+        alert('❌ Микрофон не найден. Подключите микрофон и попробуйте снова.')
+      } else {
+        alert('Ошибка микрофона: ' + (err.message || err))
+      }
     }
   }
 
