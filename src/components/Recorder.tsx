@@ -36,46 +36,34 @@ async function applyEffectsOffline(
     distortion: number
   }
 ): Promise<AudioBuffer> {
-  const offlineCtx = new OfflineAudioContext(
-    buffer.numberOfChannels,
-    buffer.length,
-    buffer.sampleRate
-  )
-
+  const offlineCtx = new OfflineAudioContext(buffer.numberOfChannels, buffer.length, buffer.sampleRate)
   const source = offlineCtx.createBufferSource()
   source.buffer = buffer
 
-  // Компрессор
   const comp = offlineCtx.createDynamicsCompressor()
   comp.threshold.value = -24; comp.knee.value = 30; comp.ratio.value = 12
   comp.attack.value = 0.003; comp.release.value = 0.25
 
-  // EQ
   const eqL = offlineCtx.createBiquadFilter(); eqL.type = 'lowshelf'; eqL.frequency.value = 200; eqL.gain.value = settings.eq.low
   const eqM = offlineCtx.createBiquadFilter(); eqM.type = 'peaking'; eqM.frequency.value = 1000; eqM.Q.value = 1; eqM.gain.value = settings.eq.mid
   const eqH = offlineCtx.createBiquadFilter(); eqH.type = 'highshelf'; eqH.frequency.value = 3000; eqH.gain.value = settings.eq.high
 
-  // Реверб
   const revNode = offlineCtx.createConvolver(); revNode.buffer = createImpulseResponse(offlineCtx)
   const revWet = offlineCtx.createGain(); revWet.gain.value = settings.reverbMix
   const revDry = offlineCtx.createGain(); revDry.gain.value = 1 - settings.reverbMix * 0.5
 
-  // Дилей
   const delNode = offlineCtx.createDelay(5.0); delNode.delayTime.value = settings.delayTime
   const delFb = offlineCtx.createGain(); delFb.gain.value = settings.delayFeedback
   const delWet = offlineCtx.createGain(); delWet.gain.value = settings.delayMix
   const delDry = offlineCtx.createGain(); delDry.gain.value = 1 - settings.delayMix
 
-  // Дисторшн
   const distNode = offlineCtx.createWaveShaper(); distNode.curve = makeDistortionCurve(settings.distortion); distNode.oversample = '4x'
   const distWet = offlineCtx.createGain(); distWet.gain.value = Math.min(1, settings.distortion / 100)
   const distDry = offlineCtx.createGain(); distDry.gain.value = 1
 
-  // Мастер
   const master = offlineCtx.createGain(); master.gain.value = settings.master
   const merger = offlineCtx.createGain()
 
-  // Сборка цепи
   source.connect(comp); comp.connect(eqL); eqL.connect(eqM); eqM.connect(eqH)
   const afterEQ = eqH
 
@@ -132,44 +120,79 @@ export default function Recorder() {
   const analyserRef = useRef<AnalyserNode | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
 
-  // Визуализация (работает на сыром сигнале)
-  const visualize = () => {
-    if (!canvasRef.current || !analyserRef.current) return
-    const ctx = canvasRef.current.getContext('2d')
-    if (!ctx) return
-    const data = new Uint8Array(analyserRef.current.frequencyBinCount)
-    const draw = () => {
-      animRef.current = requestAnimationFrame(draw)
-      analyserRef.current!.getByteFrequencyData(data)
-      ctx.fillStyle = '#0F0F1B'
-      ctx.fillRect(0, 0, 400, 100)
-      const w = 400 / data.length * 2.5
-      let x = 0
-      for (let i = 0; i < data.length; i++) {
-        const h = (data[i] / 255) * 100
-        const g = ctx.createLinearGradient(0, 100, 0, 0)
-        g.addColorStop(0, '#00D4AA'); g.addColorStop(1, '#7B61FF')
-        ctx.fillStyle = g
-        ctx.fillRect(x, 100 - h, w - 2, h)
-        x += w
-      }
+  // --- Визуализация ---
+  const drawIdle = (ctx: CanvasRenderingContext2D, w: number, h: number) => {
+    ctx.clearRect(0, 0, w, h)
+    // Сетка
+    ctx.strokeStyle = '#1F1F3A'
+    ctx.lineWidth = 1
+    for(let i=1; i<4; i++) {
+      ctx.beginPath(); ctx.moveTo(0, h*i/4); ctx.lineTo(w, h*i/4); ctx.stroke()
     }
-    draw()
+    // Линия готовности
+    ctx.strokeStyle = '#7B61FF40'
+    ctx.lineWidth = 2
+    ctx.setLineDash([4, 4])
+    ctx.beginPath(); ctx.moveTo(0, h/2); ctx.lineTo(w, h/2); ctx.stroke()
+    ctx.setLineDash([])
+    
+    ctx.fillStyle = '#6B7280'
+    ctx.font = '12px sans-serif'
+    ctx.textAlign = 'center'
+    ctx.fillText('🎙️ Готов к записи', w/2, h/2 - 8)
   }
+
+  const drawBars = (ctx: CanvasRenderingContext2D, w: number, h: number, data: Uint8Array) => {
+    ctx.clearRect(0, 0, w, h)
+    const barW = w / data.length * 2.5
+    let x = 0
+    for (let i = 0; i < data.length; i++) {
+      const barH = (data[i] / 255) * h
+      const g = ctx.createLinearGradient(0, h, 0, 0)
+      g.addColorStop(0, '#00D4AA'); g.addColorStop(1, '#7B61FF')
+      ctx.fillStyle = g
+      ctx.fillRect(x, h - barH, barW - 2, barH)
+      x += barW
+    }
+  }
+
+  const visualize = () => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+    const w = canvas.width, h = canvas.height
+    
+    // Рисуем idle сразу
+    if (!recording) {
+      drawIdle(ctx, w, h)
+      return
+    }
+
+    const data = new Uint8Array(analyserRef.current?.frequencyBinCount || 128)
+    const loop = () => {
+      if (!recording) return
+      animRef.current = requestAnimationFrame(loop)
+      analyserRef.current?.getByteFrequencyData(data)
+      drawBars(ctx, w, h, data)
+    }
+    loop()
+  }
+
+  // Перерисовка при смене состояния
+  useEffect(() => { visualize() }, [recording])
 
   const start = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       streamRef.current = stream
 
-      // Анализатор для визуализации
       const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)()
       const source = audioCtx.createMediaStreamSource(stream)
       const analyser = audioCtx.createAnalyser()
       analyser.fftSize = 256
       source.connect(analyser)
       analyserRef.current = analyser
-      visualize()
 
       mediaRecorder.current = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' })
       chunks.current = []
@@ -182,13 +205,11 @@ export default function Recorder() {
           const actx = new AudioContext()
           const rawBuffer = await actx.decodeAudioData(await blob.arrayBuffer())
           
-          // Применяем эффекты оффлайн
           const processedBuffer = await applyEffectsOffline(rawBuffer, {
             eq, master, reverbMix, delayTime, delayFeedback, delayMix, distortion
           })
           
-          const wav = bufferToWav(processedBuffer)
-          setAudioURL(URL.createObjectURL(wav))
+          setAudioURL(URL.createObjectURL(bufferToWav(processedBuffer)))
           actx.close()
         } catch (err) {
           alert('Ошибка обработки: ' + (err as Error).message)
@@ -197,6 +218,9 @@ export default function Recorder() {
           if (animRef.current) cancelAnimationFrame(animRef.current)
           stream.getTracks().forEach(t => t.stop())
           streamRef.current = null
+          analyserRef.current = null
+          // Возвращаем idle-состояние
+          visualize()
         }
       }
       
@@ -214,10 +238,6 @@ export default function Recorder() {
     }
   }
 
-  useEffect(() => {
-    // Предзагрузка пресетов при монтировании (опционально)
-  }, [])
-
   return (
     <div className="bg-[#1A1A2E] rounded-xl p-6 border border-[#7B61FF]/20">
       <div className="flex justify-between items-center mb-6">
@@ -227,7 +247,15 @@ export default function Recorder() {
         </button>
       </div>
 
-      <canvas ref={canvasRef} width={400} height={100} className="w-full h-24 bg-[#0F0F1B] rounded-lg mb-6" />
+      {/* Canvas с корректным фоном и состояниями */}
+      <div className="relative w-full h-24 bg-[#0F0F1B] rounded-lg mb-6 overflow-hidden">
+        <canvas 
+          ref={canvasRef} 
+          width={400} 
+          height={100} 
+          className="w-full h-full"
+        />
+      </div>
       
       <div className="flex justify-center gap-4 mb-6">
         {!recording ? (
