@@ -1,13 +1,26 @@
 <!doctype html>
-<html lang="en">
+<html lang="ru">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <!-- Иконка приложения (для вкладки браузера) -->
+    <link rel="icon" type="image/png" href="https://cdn-icons-png.flaticon.com/512/3663/3663345.png" />
+    
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>vocalsync</title>
+    
+    <!-- Заголовок приложения -->
+    <title>VocalSync Studio</title>
+    
+    <!-- PWA & Тема (Цвет адресной строки на мобильных) -->
+    <meta name="theme-color" content="#1A1A2E" />
+    <meta name="description" content="Профессиональная студия для записи вокала в браузере" />
+    
+    <!-- Настройки для iOS (iPhone/iPad) -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   </head>
   <body>
     <div id="root"></div>
+    <!-- Подключение React -->
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
