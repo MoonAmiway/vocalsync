@@ -26,7 +26,7 @@ const makeDistortionCurve = (amount: number): Float32Array => {
   return curve
 }
 
-// Простой аудио-процессор с эффектами
+// Аудио-процессор с эффектами
 class AudioProcessor {
   private audioContext: AudioContext | null = null
   private source: MediaStreamAudioSourceNode | null = null
@@ -65,9 +65,13 @@ class AudioProcessor {
     // 1. Источник
     this.source = this.audioContext.createMediaStreamSource(stream)
 
-    // 2. Компрессор
+    // 2. Компрессор (✅ ИСПРАВЛЕНО: через .value)
     this.compressor = this.audioContext.createDynamicsCompressor()
-    Object.assign(this.compressor, { threshold: -24, knee: 30, ratio: 12, attack: 0.003, release: 0.25 })
+    this.compressor.threshold.value = -24
+    this.compressor.knee.value = 30
+    this.compressor.ratio.value = 12
+    this.compressor.attack.value = 0.003
+    this.compressor.release.value = 0.25
 
     // 3. Эквалайзер
     this.eqLow = this.audioContext.createBiquadFilter()
@@ -292,8 +296,6 @@ export default function Recorder() {
         const actx = new AudioContext()
         const buf = await actx.decodeAudioData(await blob.arrayBuffer())
         const norm = AudioProcessor.normalizeBuffer(buf)
-        
-        // Конвертер в WAV (встроенная функция)
         const wav = bufferToWav(norm)
         setAudioURL(URL.createObjectURL(wav))
         
